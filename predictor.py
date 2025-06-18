@@ -6,18 +6,24 @@ from io import BytesIO
 from torchvision import transforms
 from xai.gradcam import GradCAM
 
-
 class RealtimePredictor:
+    """
+    Loads a trained model and performs prediction on input images.
+    Optionally applies Grad-CAM to visualize model attention.
+    """
+
     def __init__(self, model_generator, device=None):
         self.model_generator = model_generator
         self.model = model_generator.model
         self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+        # Load model weights
         model_path = f"{model_generator.save_path}/best_model.pth"
         self.model.load_state_dict(torch.load(model_path, map_location=self.device))
         self.model.to(self.device)
         self.model.eval()
 
+        # Define preprocessing transformations
         self.transform = transforms.Compose([
             transforms.Resize((model_generator.image_size, model_generator.image_size)),
             transforms.ToTensor(),
@@ -25,6 +31,16 @@ class RealtimePredictor:
         ])
 
     def predict(self, image: Image.Image, use_gradcam: bool = True):
+        """
+        Perform prediction on an image.
+
+        Args:
+            image (PIL.Image): Input image.
+            use_gradcam (bool): Whether to apply Grad-CAM.
+
+        Returns:
+            dict: Contains predicted label, confidence, and Grad-CAM image (if enabled).
+        """
         img_tensor = self.transform(image).unsqueeze(0).to(self.device)
 
         with torch.no_grad():
@@ -55,12 +71,33 @@ class RealtimePredictor:
         }
 
     def load_from_minio(self, minio_client, bucket: str, image_key: str) -> Image.Image:
+        """
+        Load image from MinIO bucket.
+
+        Args:
+            minio_client (Minio): Initialized MinIO client.
+            bucket (str): Bucket name.
+            image_key (str): Path to image in bucket.
+
+        Returns:
+            PIL.Image: Loaded image.
+        """
         obj = minio_client.get_object(bucket, image_key)
         img_data = obj.read()
         return Image.open(BytesIO(img_data)).convert("RGB")
 
 
 def get_target_layer(model, model_name):
+    """
+    Retrieve the target layer for Grad-CAM depending on model architecture.
+
+    Args:
+        model (nn.Module): Model instance.
+        model_name (str): Model type string.
+
+    Returns:
+        nn.Module: Target layer.
+    """
     if model_name.startswith("ResNet18"):
         return model.backbone.layer4[-1]
     elif model_name.startswith("MobileNetV3Small"):

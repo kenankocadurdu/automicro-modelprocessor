@@ -1,6 +1,18 @@
 from torchvision import transforms
 
 def get_train_transforms(size, mean, std, config=None):
+    """
+    Returns a composed transform for training with augmentations.
+
+    Args:
+        size (int): Output image size.
+        mean (list): Mean normalization values.
+        std (list): Std normalization values.
+        config (dict, optional): Toggle individual augmentations.
+
+    Returns:
+        torchvision.transforms.Compose: Transform pipeline.
+    """
     config = config or {}
     transform_list = []
 
@@ -25,6 +37,17 @@ def get_train_transforms(size, mean, std, config=None):
     return transforms.Compose(transform_list)
 
 def get_val_transforms(size, mean, std):
+    """
+    Returns a composed transform for validation (no augmentations).
+
+    Args:
+        size (int): Output image size.
+        mean (list): Mean normalization values.
+        std (list): Std normalization values.
+
+    Returns:
+        torchvision.transforms.Compose: Transform pipeline.
+    """
     return transforms.Compose([
         transforms.Resize((size, size)),
         transforms.ToTensor(),

@@ -7,27 +7,27 @@ import torch
 import torch.nn as nn
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 import matplotlib
-matplotlib.use("Agg") 
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from sklearn.metrics import accuracy_score, confusion_matrix, classification_report
 
 class Module(nn.Module):
+    """
+    Base model class with shared training and validation logic.
+    """
+
     def training_step(self, batch, criterion):
         images, labels = batch
         out = self(images)
         loss = self.calculate_loss(out, labels, criterion)
         return loss, 0
-    
+
     def validation_step(self, batch, criterion):
         images, labels = batch
         out = self(images)
         loss = self.calculate_loss(out, labels, criterion)
-
         acc = calculate_metrics(out, labels)
-        return {
-            'val_loss': loss.detach(),
-            'val_acc': torch.tensor(acc)
-        }
+        return {'val_loss': loss.detach(), 'val_acc': torch.tensor(acc)}
 
     def calculate_loss(self, out, labels, criterion):
         if criterion == "CrossEntropyLoss":
@@ -43,27 +43,22 @@ class Module(nn.Module):
             return (alpha * (1 - pt) ** gamma * ce_loss).mean()
         else:
             raise ValueError(f"Unknown criterion: {criterion}")
- 
+
     def validation_epoch_end(self, outputs):
         batch_losses = [x['val_loss'] for x in outputs]
         acc_scores = [x['val_acc'] for x in outputs]
-
         return {
             'val_loss': torch.stack(batch_losses).mean().item(),
             'val_acc': torch.stack(acc_scores).mean().item()
         }
 
     def epoch_end(self, epoch, result):
-        logging.info(f"Epoch [{epoch}] | "
-                     f"Train Loss: {result['train_loss']:.4f} | "
-                     f"Val Loss: {result['val_loss']:.4f} | "
-                     f"Accuracy: {result['val_acc']:.4f}")
+        logging.info(f"Epoch [{epoch}] | Train Loss: {result['train_loss']:.4f} | Val Loss: {result['val_loss']:.4f} | Accuracy: {result['val_acc']:.4f}")
 
 def calculate_metrics(pred, target):
     _, preds = torch.max(pred, dim=1)
     correct = (preds == target).float()
-    accuracy = correct.sum() / len(correct)
-    return accuracy.item()
+    return correct.sum() / len(correct)
 
 def get_optimizer(opt_func, parameters, lr):
     if opt_func == 'RMSprop':
@@ -89,16 +84,21 @@ class DeviceDataLoader:
     def __init__(self, dl, device):
         self.dl = dl
         self.device = device
-        
+
     def __iter__(self):
-        for b in self.dl: 
+        for b in self.dl:
             yield to_device(b, self.device)
 
     def __len__(self):
         return len(self.dl)
 
 class EarlyStopping:
-    def __init__(self, patience=10, delta=1e-7, pth_name="best_model", save_path="results", model_generator=None, device=None): 
+    """
+    Stops training when validation loss does not improve after specified patience.
+    Saves best model and optionally exports ONNX.
+    """
+
+    def __init__(self, patience=10, delta=1e-7, pth_name="best_model", save_path="results", model_generator=None, device=None):
         self.patience = patience
         self.counter = 0
         self.best_score = None
@@ -108,31 +108,22 @@ class EarlyStopping:
         self.path = os.path.join(os.getcwd(), save_path, pth_name)
         self.model_generator = model_generator
         self.device = device
-        
+
     def __call__(self, val_loss, model):
         score = val_loss
-
-        if self.best_score is None:
-            self.best_score = score
-            self.save_checkpoint(val_loss, model)
-        elif score > self.best_score + self.delta:
-            self.counter += 1
-            logging.info("EarlyStopping counter: {} out of {}".format(self.counter, self.patience))
-            if self.counter >= self.patience:
-                self.early_stop = True
-        else:
+        if self.best_score is None or score < self.best_score - self.delta:
             self.best_score = score
             self.save_checkpoint(val_loss, model)
             self.counter = 0
+        else:
+            self.counter += 1
+            logging.info(f"EarlyStopping counter: {self.counter} out of {self.patience}")
+            if self.counter >= self.patience:
+                self.early_stop = True
 
     def save_checkpoint(self, val_loss, model):
         logging.info(f"Validation loss decreased ({self.val_loss_min:.10f} --> {val_loss:.10f}). Saving model...")
         torch.save(model.state_dict(), self.path + ".pth")
-        dummy_input = torch.randn(1, 3, self.model_generator.image_size, self.model_generator.image_size).to(self.device)
-        #torch.onnx.export(model, dummy_input, self.path + ".onnx", input_names=['input'], output_names=['output'],
-        #                    dynamic_axes={'input': {0: 'batch_size'}, 'output': {0: 'batch_size'}},
-        #                    opset_version=11)
-
         self.val_loss_min = val_loss
 
 @torch.no_grad()
@@ -143,7 +134,6 @@ def evaluate(model, val_loader, criterion):
 
 @torch.no_grad()
 def evaluate_best_model(model_path, val_loader, device, minio_client, minio_bucket, result_dir, model_generator):
-    # Model yeniden kurulmalı
     model = model_generator.model
     model.load_state_dict(torch.load(model_path, map_location=device))
     model.to(device)
@@ -151,7 +141,6 @@ def evaluate_best_model(model_path, val_loader, device, minio_client, minio_buck
 
     all_preds = []
     all_labels = []
-
     for batch in val_loader:
         images, labels = batch
         images = images.to(device)
@@ -176,9 +165,6 @@ def evaluate_best_model(model_path, val_loader, device, minio_client, minio_buck
 
     upload_to_minio(minio_client, minio_bucket, eval_path, f"{result_dir}/evaluation.json")
 
-
-
-
 def plot_training_progress(history, save_path):
     epochs = range(1, len(history) + 1)
     val_loss = [entry['val_loss'] for entry in history]
@@ -196,16 +182,16 @@ def plot_training_progress(history, save_path):
 
 def fit(epochs: int, lr: float, model_generator, train_loader, val_loader, opt_func: str, criterion: str,
         batch_size: int, accumulation_steps: int, chunk_size: int, patience: int,
-        minio_client=None, minio_bucket=None): 
+        minio_client=None, minio_bucket=None):
 
     device = get_default_device()
-    model = model_generator.model
-    model = to_device(model, device)
-
+    model = to_device(model_generator.model, device)
     train_loader = DeviceDataLoader(train_loader, device)
     val_loader = DeviceDataLoader(val_loader, device)
+
     early_stopping = EarlyStopping(patience=patience, save_path=model_generator.save_path,
                                    model_generator=model_generator, device=device)
+
     optimizer = get_optimizer(opt_func, model.parameters(), lr)
     scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=2, verbose=True, min_lr=1e-7)
 
@@ -213,8 +199,7 @@ def fit(epochs: int, lr: float, model_generator, train_loader, val_loader, opt_f
         history = []
         for epoch in range(int(epochs)):
             model.train()
-            current_lr = optimizer.param_groups[0]['lr']
-            logging.info(f"Epoch [{epoch}/{epochs}] started with lr = {current_lr:.10f}")
+            logging.info(f"Epoch [{epoch}/{epochs}] started with lr = {optimizer.param_groups[0]['lr']:.10f}")
 
             train_losses = []
             for chunk_start in range(0, len(train_loader), chunk_size):
@@ -244,7 +229,6 @@ def fit(epochs: int, lr: float, model_generator, train_loader, val_loader, opt_f
 
             if early_stopping.early_stop:
                 logging.info(f"Early stopping at epoch {epoch}")
-
                 evaluate_best_model(
                     model_path=os.path.join(model_generator.save_path, 'best_model.pth'),
                     val_loader=val_loader,
@@ -252,7 +236,7 @@ def fit(epochs: int, lr: float, model_generator, train_loader, val_loader, opt_f
                     minio_client=minio_client,
                     minio_bucket=minio_bucket,
                     result_dir=model_generator.save_path,
-                    model_generator=model_generator  # Modeli yeniden kurmak için
+                    model_generator=model_generator
                 )
                 break
 
@@ -263,31 +247,28 @@ def fit(epochs: int, lr: float, model_generator, train_loader, val_loader, opt_f
     plot_training_progress(history, model_generator.save_path)
 
     evaluate_best_model(
-            model_path=os.path.join(model_generator.save_path, 'best_model.pth'),
-            val_loader=val_loader,
-            device=device,
-            minio_client=minio_client,
-            minio_bucket=minio_bucket,
-            result_dir=model_generator.save_path,
-            model_generator=model_generator
-        )
-
+        model_path=os.path.join(model_generator.save_path, 'best_model.pth'),
+        val_loader=val_loader,
+        device=device,
+        minio_client=minio_client,
+        minio_bucket=minio_bucket,
+        result_dir=model_generator.save_path,
+        model_generator=model_generator
+    )
 
     history_path = os.path.join(model_generator.save_path, 'history.json')
     with open(history_path, 'w') as f:
         json.dump(history, f)
 
     if minio_client and minio_bucket:
-        result_dir = model_generator.save_path
         for filename in ["loss_plot.png", "history.json", "best_model.pth", "evaluation.json"]:
-            local_file = os.path.join(result_dir, filename)
-            remote_file = f"{result_dir}/{filename}"
+            local_file = os.path.join(model_generator.save_path, filename)
+            remote_file = f"{model_generator.save_path}/{filename}"
             upload_to_minio(minio_client, minio_bucket, local_file, remote_file)
             if os.path.exists(local_file):
                 os.remove(local_file)
-        if os.path.isdir(result_dir) and not os.listdir(result_dir):
-            os.rmdir(result_dir)
-
+        if os.path.isdir(model_generator.save_path) and not os.listdir(model_generator.save_path):
+            os.rmdir(model_generator.save_path)
 
 def upload_to_minio(minio_client, bucket, local_path, remote_path):
     with open(local_path, "rb") as file_data:

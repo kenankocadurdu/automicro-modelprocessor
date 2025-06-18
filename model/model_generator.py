@@ -6,6 +6,10 @@ from torchvision import models
 from model.model_arch import Module
 
 class generator:
+    """
+    Factory class to initialize supported deep learning model architectures.
+    """
+
     def __init__(self, name, num_class, image_size, run_name=None):
         self.name = name
         self.num_class = num_class
@@ -28,8 +32,10 @@ class generator:
             raise ValueError(msg)
 
 def available_models():
+    """
+    Return list of supported model names.
+    """
     return ["ResNet18", "MobileNetV3Small", "ResNet18_SE", "ResNet18_CBAM", "ResNet18_ECA"]
-
 
 class ResNet18(Module):
     def __init__(self, num_classes=1):
@@ -50,6 +56,9 @@ class MobileNetV3Small(Module):
         return self.backbone(x)
 
 ########################################
+# Attention Modules
+########################################
+
 class SEBlock(nn.Module):
     def __init__(self, in_channels, reduction=16):
         super(SEBlock, self).__init__()
@@ -66,7 +75,7 @@ class SEBlock(nn.Module):
         y = self.avg_pool(x).view(b, c)
         y = self.fc(y).view(b, c, 1, 1)
         return x * y
-########################################
+
 class ChannelAttention(nn.Module):
     def __init__(self, in_planes, ratio=16):
         super(ChannelAttention, self).__init__()
@@ -106,7 +115,7 @@ class CBAM(nn.Module):
         x = self.ca(x)
         x = self.sa(x)
         return x
-########################################
+
 class ECABlock(nn.Module):
     def __init__(self, channel, k_size=3):
         super(ECABlock, self).__init__()
@@ -120,7 +129,11 @@ class ECABlock(nn.Module):
         y = self.conv(y)
         y = self.sigmoid(y).view(b, c, 1, 1)
         return x * y
+
 ########################################
+# Models with Attention
+########################################
+
 class ResNet18_SE(Module):
     def __init__(self, num_classes):
         super().__init__()
@@ -159,4 +172,3 @@ class ResNet18_ECA(Module):
 
     def forward(self, x):
         return self.backbone(x)
-    

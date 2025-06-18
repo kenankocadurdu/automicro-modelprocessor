@@ -1,26 +1,36 @@
-import json, os, logging, requests, io, random
+import json
+import os
+import logging
+import requests
+import io
+import random
+import traceback
+
 from io import BytesIO
 from collections import defaultdict
 from typing import Optional, Dict
-from fastapi import FastAPI, HTTPException
+
+from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from PIL import Image
 from minio import Minio
 from botocore.exceptions import ClientError
-from model.model_generator import generator
-from trainer import Executor
-from fastapi import BackgroundTasks
+
 import torch
 import torchvision.transforms as transforms
-import traceback
 
+from model.model_generator import generator
+from trainer import Executor
+
+# Initialize FastAPI app
 app = FastAPI(
     title="AutoMicro MLOps",
     version="1.0.0",
-    description="Training and Prediction"
+    description="Training and Prediction API"
 )
 
+# Enable CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -31,8 +41,9 @@ app.add_middleware(
 
 logging.basicConfig(level=logging.INFO)
 
+# Request schema for training
 class TrainingRequest(BaseModel):
-    training_project_id: int 
+    training_project_id: int
     data_project_id: int
     dataset_id: int
     version_tag: str
@@ -47,6 +58,7 @@ class TrainingRequest(BaseModel):
     minio_bucket: str
 
 def send_status(callback_url, status, training_project_id, dataset_id, version_tag, error=None):
+    """Send training status updates to callback URL."""
     if not callback_url:
         return
     try:
@@ -61,27 +73,32 @@ def send_status(callback_url, status, training_project_id, dataset_id, version_t
     except Exception as e:
         logging.warning(f"Status callback failed: {e}")
 
-
 @app.post("/train")
 def trigger_training(req: TrainingRequest, background_tasks: BackgroundTasks):
+    """Endpoint to start training in background."""
     background_tasks.add_task(run_training_pipeline, req)
     return {"message": "Training scheduled"}
 
-
 def run_training_pipeline(req: TrainingRequest):
+    """Main training pipeline."""
     try:
         logging.info(f"Received TrainingRequest: {req.json()}")
+
+        # Initialize MinIO client
         minio_client = Minio(
             req.minio_endpoint,
             access_key=req.minio_access_key,
             secret_key=req.minio_secret_key,
             secure=False
         )
+
+        # Read version JSON file
         json_key = f"versions/{req.data_project_id}/{req.dataset_id}/{req.version_tag}.json"
         response = minio_client.get_object(req.minio_bucket, json_key)
         version_json = json.loads(response.read())
         files = version_json["files"]
 
+        # Split into training and validation sets
         random.seed(45)
         class_files = defaultdict(list)
         for item in files:
@@ -104,48 +121,38 @@ def run_training_pipeline(req: TrainingRequest):
     except Exception as e:
         logging.exception("MinIO JSON read failed")
         raise HTTPException(status_code=500, detail=f"MinIO JSON read failed: {e}")
-    try:
-        train_io = BytesIO()
-        train_io.write(json.dumps(train_files).encode("utf-8"))
-        train_io.seek(0)
-        minio_client.put_object(
-            req.minio_bucket,
-            f"training/{req.data_project_id}/{req.dataset_id}/{req.training_project_id}/datasets/train_dataset.json",
-            train_io,
-            length=train_io.getbuffer().nbytes
-        )
-        train_io.close()
 
-        val_io = BytesIO()
-        val_io.write(json.dumps(val_files).encode("utf-8"))
-        val_io.seek(0)
-        minio_client.put_object(
-            req.minio_bucket,
-            f"training/{req.data_project_id}/{req.dataset_id}/{req.training_project_id}/datasets/val_dataset.json",
-            val_io,
-            length=val_io.getbuffer().nbytes
-        )
-        val_io.close()
+    try:
+        # Upload training/validation split files
+        for split, file_data in zip(["train", "val"], [train_files, val_files]):
+            stream = BytesIO(json.dumps(file_data).encode("utf-8"))
+            minio_client.put_object(
+                req.minio_bucket,
+                f"training/{req.data_project_id}/{req.dataset_id}/{req.training_project_id}/datasets/{split}_dataset.json",
+                stream,
+                length=stream.getbuffer().nbytes
+            )
+            stream.close()
     except ClientError as e:
         raise HTTPException(status_code=500, detail=f"MinIO upload error: {str(e)}")
 
     try:
-        logging.info(f"Starting training with model: {req.model_name}, num_class: {req.num_class}, image_size: {req.hyperparameters.get('image_size', 224)}")
+        # Initialize model
         model_generator = generator(
-                        name=req.model_name, num_class=req.num_class, 
-                        image_size=int(req.hyperparameters.get("image_size", 224)),
-                        run_name=f"{req.model_name}_{req.version_tag}"
+            name=req.model_name,
+            num_class=req.num_class,
+            image_size=int(req.hyperparameters.get("image_size", 224)),
+            run_name=f"{req.model_name}_{req.version_tag}"
         )
         model_generator.training_project_id = req.training_project_id
         model_generator.save_path = f"training/{req.data_project_id}/{req.dataset_id}/{req.training_project_id}/results"
         model_generator.data_project_id = req.data_project_id
         model_generator.dataset_id = req.dataset_id
 
-
-
+        # Set up executor
         executor = Executor(
             path_dataset=f"datasets/{req.training_project_id}/{req.dataset_id}",
-            batch_size = int(req.hyperparameters.get("batch_size", 4)),
+            batch_size=int(req.hyperparameters.get("batch_size", 4)),
             augmentation=True,
             num_threads=1,
             device_id=0,
@@ -164,6 +171,7 @@ def run_training_pipeline(req: TrainingRequest):
             minio_bucket=req.minio_bucket
         )
 
+        # Train the model
         send_status(req.callback_url, "running", req.training_project_id, req.dataset_id, req.version_tag)
         os.makedirs(model_generator.save_path, exist_ok=True)
         executor.execute(model_generator)
@@ -176,12 +184,12 @@ def run_training_pipeline(req: TrainingRequest):
 
     return {"message": "Training started and executed successfully"}
 
-
 @app.get("/available_models")
 def list_models():
+    """Return list of supported models."""
     return ["ResNet18", "MobileNetV3Small", "ResNet18_CBAM"]
 
-
+# Request schema for prediction
 class PredictRequest(BaseModel):
     model_path: str
     image_path: str
@@ -192,11 +200,10 @@ class PredictRequest(BaseModel):
     minio_bucket: str
 
 def load_model_from_minio_with_generator(minio_client, bucket, model_path, model_type):
+    """Download and load model from MinIO."""
     response = minio_client.get_object(bucket, model_path)
-    model_bytes = response.read()
-    buffer = io.BytesIO(model_bytes)
+    buffer = io.BytesIO(response.read())
     state_dict = torch.load(buffer, map_location=torch.device("cuda" if torch.cuda.is_available() else "cpu"))
-
 
     model_generator = generator(name=model_type, num_class=2, image_size=224, run_name="predict_run")
     model = model_generator.model
@@ -206,8 +213,7 @@ def load_model_from_minio_with_generator(minio_client, bucket, model_path, model
 
 def load_image_from_minio(minio_client, bucket, image_path):
     response = minio_client.get_object(bucket, image_path)
-    image = Image.open(io.BytesIO(response.read())).convert("RGB")
-    return image
+    return Image.open(io.BytesIO(response.read())).convert("RGB")
 
 def preprocess_image(image):
     transform = transforms.Compose([
@@ -216,9 +222,9 @@ def preprocess_image(image):
     ])
     return transform(image).unsqueeze(0)
 
-
 @app.post("/predict")
 async def predict(req: PredictRequest):
+    """Perform image classification prediction."""
     try:
         minio_client = Minio(
             req.minio_endpoint,
